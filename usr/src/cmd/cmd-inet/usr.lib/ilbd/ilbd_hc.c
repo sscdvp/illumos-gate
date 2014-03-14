@@ -62,6 +62,7 @@ static boolean_t hc_timer_restarted;
 static void ilbd_hc_probe_timer(iu_tq_t *, void *);
 static ilb_status_t ilbd_hc_restart_timer(ilbd_hc_t *, ilbd_hc_srv_t *);
 static boolean_t ilbd_run_probe(ilbd_hc_srv_t *);
+static void destroy_argv(char *[], int);
 
 #define	MAX(a, b)	((a) > (b) ? (a) : (b))
 
@@ -285,6 +286,7 @@ ilbd_create_hc(const ilb_hc_info_t *hc_info, int ev_port,
 		    ILB_STATUS_OK) {
 			ilbd_audit_hc_event(NULL, hc_info, ILBD_CREATE_HC,
 			    ret, ucredp);
+			list_destroy(&hc->ihc_rules);
 			free(hc);
 			return (ret);
 		}
@@ -345,6 +347,7 @@ ilbd_destroy_hc(const char *hc_name, const struct passwd *ps,
 	}
 
 	list_remove(&ilbd_hc_list, hc);
+	list_destroy(&hc->ihc_rules);
 	free(hc);
 	ilbd_audit_hc_event(hc_name, NULL, ILBD_DESTROY_HC, ret, ucredp);
 	return (ret);
@@ -845,6 +848,7 @@ ilbd_hc_associate_rule(const ilbd_rule_t *rule, int ev_port)
 		    ev_port)) != ILB_STATUS_OK) {
 			/* Remove all previously added servers */
 			ilbd_hc_srv_rem_all(hc_rule);
+			list_destroy(&hc_rule->hcr_servers);
 			free(hc_rule);
 			return (ret);
 		}
@@ -879,8 +883,10 @@ ilbd_hc_dissociate_rule(const ilbd_rule_t *rule)
 		return (ILB_STATUS_ENOENT);
 	}
 	ilbd_hc_srv_rem_all(hc_rule);
+	list_destroy(&hc_rule->hcr_servers);
 	list_remove(&hc->ihc_rules, hc_rule);
 	hc->ihc_rule_cnt--;
+	free(hc_rule);
 	return (ILB_STATUS_OK);
 }
 
@@ -1101,14 +1107,13 @@ topo_2_str(ilb_topo_t topo)
  * The passed in argv is assumed to have HC_PROBE_ARGC elements.
  */
 static boolean_t
-create_argv(ilbd_hc_srv_t *srv, char *argv[])
+create_argv(ilbd_hc_srv_t *srv, char *argv[], int argc)
 {
 	char buf[INET6_ADDRSTRLEN];
 	ilbd_rule_t const *rule;
 	ilb_sg_srv_t const *sg_srv;
 	struct in_addr v4_addr;
 	in_port_t port;
-	int i;
 
 	rule = srv->shc_hc_rule->hcr_rule;
 	sg_srv = srv->shc_sg_srv;
@@ -1238,20 +1243,19 @@ create_argv(ilbd_hc_srv_t *srv, char *argv[])
 	return (B_TRUE);
 
 cleanup:
-	for (i = 0; i < HC_PROBE_ARGC; i++) {
-		if (argv[i] != NULL)
-			free(argv[i]);
-	}
+	destroy_argv(argv, argc);
 	return (B_FALSE);
 }
 
 static void
-destroy_argv(char *argv[])
+destroy_argv(char *argv[], int argc)
 {
 	int i;
 
-	for (i = 0; argv[i] != NULL; i++)
-		free(argv[i]);
+	for (i = 0; i < argc; i++) {
+		if (argv[i] != NULL)
+			free(argv[i]);
+	}
 }
 
 /* Spawn a process to run the hc probe on the given server. */
@@ -1325,7 +1329,7 @@ ilbd_run_probe(ilbd_hc_srv_t *srv)
 		goto cleanup;
 	}
 
-	if (!create_argv(srv, child_argv)) {
+	if (!create_argv(srv, child_argv, HC_PROBE_ARGC)) {
 		logdebug("ilbd_run_probe: create_argv");
 		goto cleanup;
 	}
@@ -1351,7 +1355,7 @@ ilbd_run_probe(ilbd_hc_srv_t *srv)
 	}
 
 	(void) close(fds[1]);
-	destroy_argv(child_argv);
+	destroy_argv(child_argv, HC_PROBE_ARGC);
 	srv->shc_child_pid = pid;
 	srv->shc_child_fd = fds[0];
 	srv->shc_ev = probe_ev;
@@ -1375,7 +1379,7 @@ ilbd_run_probe(ilbd_hc_srv_t *srv)
 cleanup:
 	(void) close(fds[0]);
 	(void) close(fds[1]);
-	destroy_argv(child_argv);
+	destroy_argv(child_argv, HC_PROBE_ARGC);
 	if (probe_ev != NULL)
 		free(probe_ev);
 	return (B_FALSE);
