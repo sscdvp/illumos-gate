@@ -1409,7 +1409,7 @@ void
 ilb_sticky_hash_fini(ilb_stack_t *ilbs)
 {
 	int i;
-	ilb_sticky_t *s;
+	ilb_sticky_t *s, *nxt_s;
 
 	if (ilbs->ilbs_sticky_hash == NULL)
 		return;
@@ -1423,7 +1423,9 @@ ilb_sticky_hash_fini(ilb_stack_t *ilbs)
 		tid = ilbs->ilbs_sticky_timer_list[i].tid;
 		ilbs->ilbs_sticky_timer_list[i].tid = 0;
 		mutex_exit(&ilbs->ilbs_sticky_timer_list[i].tid_lock);
-		(void) untimeout(tid);
+		if (tid != 0)
+			(void) untimeout(tid);
+		mutex_destroy(&ilbs->ilbs_sticky_timer_list[i].tid_lock);
 	}
 	kmem_free(ilbs->ilbs_sticky_timer_list, sizeof (ilb_timer_t) *
 	    ilb_sticky_timer_size);
@@ -1431,12 +1433,19 @@ ilb_sticky_hash_fini(ilb_stack_t *ilbs)
 	ilbs->ilbs_sticky_taskq = NULL;
 
 	for (i = 0; i < ilbs->ilbs_sticky_hash_size; i++) {
-		while ((s = list_head(&ilbs->ilbs_sticky_hash[i].sticky_head))
-		    != NULL) {
-			list_remove(&ilbs->ilbs_sticky_hash[i].sticky_head, s);
+		mutex_enter(&ilbs->ilbs_sticky_hash[i].sticky_lock);
+		for (s = list_head(&ilbs->ilbs_sticky_hash[i].sticky_head); s != NULL;
+		    s = nxt_s) {
+		    	ASSERT(s->refcnt == 0);
+			nxt_s = list_next(&ilbs->ilbs_sticky_hash[i].sticky_head, s);
 			ILB_SERVER_REFRELE(s->server);
-			kmem_free(s, sizeof (ilb_sticky_t));
+			list_remove(&ilbs->ilbs_sticky_hash[i].sticky_head, s);
+			kmem_cache_free(ilb_sticky_cache, s);
+			ilbs->ilbs_sticky_hash[i].sticky_cnt--;
 		}
+		mutex_exit(&ilbs->ilbs_sticky_hash[i].sticky_lock);
+		list_destroy(&ilbs->ilbs_sticky_hash[i].sticky_head);
+		mutex_destroy(&ilbs->ilbs_sticky_hash[i].sticky_lock);
 	}
 	kmem_free(ilbs->ilbs_sticky_hash, ilbs->ilbs_sticky_hash_size *
 	    sizeof (ilb_sticky_hash_t));
