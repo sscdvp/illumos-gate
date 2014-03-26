@@ -320,8 +320,6 @@ ilb_conn_hash_init(ilb_stack_t *ilbs)
 	for (i = 0; i < ilbs->ilbs_conn_hash_size; i++) {
 		mutex_init(&ilbs->ilbs_c2s_conn_hash[i].ilb_conn_hash_lock,
 		    NULL, MUTEX_DEFAULT, NULL);
-	}
-	for (i = 0; i < ilbs->ilbs_conn_hash_size; i++) {
 		mutex_init(&ilbs->ilbs_s2c_conn_hash[i].ilb_conn_hash_lock,
 		    NULL, MUTEX_DEFAULT, NULL);
 	}
@@ -379,7 +377,9 @@ ilb_conn_hash_fini(ilb_stack_t *ilbs)
 		tid = ilbs->ilbs_conn_timer_list[i].tid;
 		ilbs->ilbs_conn_timer_list[i].tid = 0;
 		mutex_exit(&ilbs->ilbs_conn_timer_list[i].tid_lock);
-		(void) untimeout(tid);
+		if (tid != 0)
+			(void) untimeout(tid);
+		mutex_destroy(&ilbs->ilbs_conn_timer_list[i].tid_lock);
 	}
 	kmem_free(ilbs->ilbs_conn_timer_list, sizeof (ilb_timer_t) *
 	    ilb_conn_timer_size);
@@ -388,10 +388,11 @@ ilb_conn_hash_fini(ilb_stack_t *ilbs)
 
 	/* Then remove all the conns. */
 	for (i = 0; i < ilbs->ilbs_conn_hash_size; i++) {
-		while ((connp = ilbs->ilbs_s2c_conn_hash->ilb_connp) != NULL) {
-			ilbs->ilbs_s2c_conn_hash->ilb_connp =
+		mutex_enter(&ilbs->ilbs_c2s_conn_hash[i]->ilb_conn_hash_lock);
+		mutex_enter(&ilbs->ilbs_s2c_conn_hash[i]->ilb_conn_hash_lock);
+		while ((connp = ilbs->ilbs_s2c_conn_hash[i]->ilb_connp) != NULL) {
+			ilbs->ilbs_s2c_conn_hash[i]->ilb_connp =
 			    connp->conn_s2c_next;
-			ILB_SERVER_REFRELE(connp->conn_server);
 			if (connp->conn_rule_cache.topo == ILB_TOPO_IMPL_NAT) {
 				ilb_nat_src_entry_t *ent;
 				in_port_t port;
@@ -405,8 +406,19 @@ ilb_conn_hash_fini(ilb_stack_t *ilbs)
 				vmem_free(ent->nse_port_arena,
 				    (void *)(uintptr_t)port, 1);
 			}
+			if (connp->conn_sticky != NULL)
+				ILB_STICKY_REFRELE(connp->conn_sticky);
+			ILB_SERVER_REFRELE(connp->conn_server);
 			kmem_cache_free(ilb_conn_cache, connp);
+			ASSERT(ilbs->ilbs_c2s_conn_hash[i]->ilb_conn_cnt > 0);
+			ilbs->ilbs_c2s_conn_hash[i]->ilb_conn_cnt--;
+			ASSERT(ilbs->ilbs_s2c_conn_hash[i]->ilb_conn_cnt > 0);
+			ilbs->ilbs_s2c_conn_hash[i]->ilb_conn_cnt--;
 		}
+		mutex_exit(&ilbs->ilbs_s2c_conn_hash[i]->ilb_conn_hash_lock);
+		mutex_exit(&ilbs->ilbs_c2s_conn_hash[i]->ilb_conn_hash_lock);
+		mutex_destroy(&ilbs->ilbs_s2c_conn_hash[i]->ilb_conn_hash_lock);
+		mutex_destroy(&ilbs->ilbs_c2s_conn_hash[i]->ilb_conn_hash_lock);
 	}
 	kmem_free(ilbs->ilbs_c2s_conn_hash, sizeof (ilb_conn_hash_t) *
 	    ilbs->ilbs_conn_hash_size);
